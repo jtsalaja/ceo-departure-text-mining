@@ -74,7 +74,7 @@ A supervised classifier could predict crisis vs. normal, but would only confirm 
 3. Set up Python environment for BERTopic (update the path in the `bertopic-setup` chunk)
 4. Render the Quarto document:
    ```bash
-   quarto render analysis.qmd
+   analysis.qmd
    ```
 
 **Note on BERTopic reproducibility**: Results include fixed random seeds for UMAP (`random_state = 33L`) and LDA (`seed = 42`), but minor variations may occur across different hardware/software configurations.
