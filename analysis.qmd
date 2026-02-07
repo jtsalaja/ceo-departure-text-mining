@@ -1,0 +1,1906 @@
+---
+title: "Corporate Communication During Economic Crises: A Text Mining Analysis of CEO Departurese"
+author: "Jelizaveta Tsalaja"
+self-contained: true
+toc: true
+toc-depth: 5
+toc-location: "left" 
+format:
+  html:
+    theme: cosmo
+editor:
+  render-on-save: true
+  preview: true
+---
+
+## Overview
+
+This analysis investigates how corporate communication changes during economic crises by examining 3,547 CEO departure announcements from S&P 1500 firms (2003-2014), comparing the 2008-2009 financial crisis to stable periods.
+
+**Research Question:** Do CEO departure narratives fundamentally change during economic crises?
+
+**Methods:** Text mining using unsupervised learning (LDA topic modeling, keyness analysis, k-medoids clustering, BERTopic transformer-based semantic analysis)
+
+**Key Finding:** Crises recalibrate rather than rupture corporate communication, shifting vocabulary externalization and thematic emphasis while maintaining similar narrative structures.
+
+------------------------------------------------------------------------
+
+## Part A: Similarity
+
+### Importing Libraries
+
+We start our work by loading all of the libraries that will be necessary throughout Parts A and B. To install and load libraries in one go we are using `p_load()`.
+
+```{r loading-libraries}
+# Note on reproducibility:
+# To make code install packages on other computers please uncomment the install.packages() commands below
+#install.packages("devtools")
+library(devtools)
+#install.packages("pacman")
+library(pacman)
+
+p_load(readr)
+p_load(tidytuesdayR)
+p_load(tidyverse)
+p_load(naniar)
+p_load(quanteda)
+p_load(topicmodels)
+p_load(tidytext)
+p_load(bertopicr)
+p_load(janitor)
+p_load(quanteda.textstats)
+p_load(seededlda)
+p_load(udpipe)
+p_load(isotree)
+p_load(plotly)
+p_load(bertopicr)
+p_load(cluster)
+p_load(dbscan)
+p_load(quanteda.textplots)
+p_load(factoextra)
+p_load(quanteda.textmodels)
+p_load(uwot)
+p_load(stm)
+p_load(doParallel)
+p_load(topicdoc)
+p_load(reticulate)
+```
+
+### Data Source and Reproducibility
+
+This analysis uses the CEO Departures dataset from Tidy Tuesday (2021, Week 18), which contains 9,423 CEO departure events from S&P 1500 firms between 1987 and 2020.
+
+**Data access:** The dataset is loaded using the `tidytuesdayR` package, which provides a standardized interface to Tidy Tuesday datasets.
+
+**Required packages:** `tidytuesdayR` (install with: `install.packages("tidytuesdayR")`)
+
+**To reproduce this analysis:** Run the code below to automatically fetch the data
+
+```{r loading-data-tidytuesday}
+# Load data using tidytuesdayR package
+tuesdata <- tidytuesdayR::tt_load(2021, week = 18)
+departures <- tuesdata$departures
+```
+
+**Alternative if URL is unavailable:** If the Tidy Tuesday package becomes inaccessible, please download the dataset manually from: <https://github.com/rfordatascience/tidytuesday/tree/master/data/2021/2021-04-27> and save it as as `data/departures.csv`. Then, to access data and reproduce the code modify the code chunk above to: `departures <- read_csv('data/departures.csv')`
+
+Once we have ensured data accessibilty and reproducibility, we can view our dataset. The datatset has 19 variables and 9,423 observations.
+
+```{r preview-data}
+# View our data
+glimpse(departures)
+```
+
+With the help of GitHub repository, which contains the descriptions of the variables, we can create a table containing simple explanations of each variable.
+
+| Variable | Description |
+|----|----|
+| dismissal_dataset_id | Unique identifier for each departure event (primary key) |
+| coname | Company name (from Compustat database) |
+| gvkey | Company identifier (from Compustat database) |
+| fyear | Fiscal year when the departure occurred |
+| co_per_rol | Executive/company identifier (from Execucomp database) |
+| exec_fullname | Full name of the departing CEO |
+| departure_code | Numerical code indicating reason for departure |
+| ceo_dismissal | Binary indicator: 1 = involuntary departure (non-health related), 0 = voluntary |
+| interim_coceo | Indicates if CEO was serving as interim or co-CEO |
+| tenure_no_ceodb | For returning CEOs, indicates which tenure period (first, second, etc.) |
+| max_tenure_ceodb | Total number of times this person served as CEO of this company |
+| fyear_gone | Fiscal year of the CEO's effective departure date |
+| leftofc | Date when CEO officially left office |
+| still_there | Date when CEO status was last verified (if still in office) |
+| notes | Narrative text describing departure circumstances and justification for coding |
+| sources | URLs of internet or library sources documenting the departure |
+| eight_ks | URLs of relevant SEC 8-K filings (270 days before/after departure) |
+| cik | Company's Central Index Key (SEC identifier) |
+| \_merge | Technical variable from data merge process |
+
+We can see that our dataset has a lot of information. Let's identify the most useful variables for our analysis.
+
+**Key variables of interest:**
+
+-   notes: narrative text (main text field for analysis)
+-   departure_code: reason for departure
+-   fyear: year of departure
+-   coname: company name
+
+To further understand the dataset we can explore what percentage of our key variables are missing.
+
+```{r identify-missing-data}
+# We check for missingness in key variables
+departures |>
+  select(notes, departure_code, fyear, coname) |>
+  naniar::miss_var_summary()
+```
+
+We can see that 17.4% of notes (text we will be working with) is missing. This is a significant percentage of missing data, though, we have to keep in mind that our dataset contains 9423 observations. Thus, even with 17.4% of notes missing we have 7783 notes left to work with.
+
+To further understand missing data, we can visualise it.
+
+```{r plot-missing-data}
+# We also plot the missing data
+naniar::vis_miss(departures |>
+                   select(notes, departure_code, fyear, coname)) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+We can see that the departure code and notes (text) are almost always missing together. Since it is not a numerical data but text, we will not impute it. Thus, we will continue our analysis without the missing notes and, for convenience, without the entries that do not have departure code.
+
+Let's consider how long the notes of our text are on average.
+
+```{r count-characters-per-note}
+# We next find count of characters in each note
+departures_len <- departures |>
+  mutate(text_length = str_length(notes))
+
+# Create summary statistics of node length
+departures_len |>
+  filter(!is.na(notes)) |>
+  summarise(
+    min_length = min(text_length),
+    median_length = median(text_length),
+    mean_length = mean(text_length),
+    max_length = max(text_length)
+  )
+```
+
+As we can see, the shortest note is 5 characters, while the longest one is 3,117 characters. This indicates a significant variation in note length. Let's now look at the distribution of the text length.
+
+```{r -plot-distribution-of-text-length}
+# We plot the distribution of note text
+departures_len |>
+  filter(!is.na(notes)) |>
+  filter(!is.na(departure_code)) |>
+  ggplot(aes(x = text_length, fill = "Notes")) +
+  geom_histogram(bins = 40, alpha = 0.7) +
+  scale_fill_viridis_d(guide = "none") +
+  labs(
+    title = "Distribution of Note Text Length",
+    x = "Number of Characters",
+    y = "Frequency"
+  ) +
+  theme_minimal()
+```
+
+From the plot we can identify that majority of the notes are within the length of 0-1000 characters, which is approximately 0-200 words. We will keep this in mind when looking for similar and different notes.
+
+##### Data Cleaning
+
+Given the dataset contains approximately 7779 well-documented departure events, we proceed with the full dataset. The sample size is computationally manageable and preserves the full range of departure circumstances, which is essential for detecting similarities and anomalies.
+
+Additionaly, from the original dataset of 19 variables, we decided to retain only those essential for text analysis and interpretation:
+
+**Variables kept:**
+
+-   **Text**: `notes` (departure narrative - primary analysis variable)
+-   **Identifiers**: `dismissal_dataset_id`, `coname`, `exec_fullname`
+-   **Year**: `fyear` (year of departure)
+-   **Categorization**: `departure_code`, `ceo_dismissal`
+
+**Derived variables created:**
+
+-   `departure_type` - readable labels for departure codes
+-   `text_length` - number of characters in notes
+
+This selection maintains clarity while preserving all information necessary for interpreting similarity patterns and anomalies in CEO departures.
+
+```{r clean-data}
+# Exclude observations without note text and departure code
+departures_clean <- departures |>
+  filter(!is.na(notes)) |>
+  filter(!is.na(departure_code)) |>
+  
+  # Select the variables we will use
+  select(
+    dismissal_dataset_id,      # Unique identifier
+    coname,                    # Company name
+    exec_fullname,             # CEO name
+    fyear,                     # Year of departure
+    departure_code,            # Reason code
+    ceo_dismissal,             # Involuntary dummy variable
+    notes                      # Text we will analyze
+  ) |>
+  
+  # We also add derived variable - label for departure codes from
+  # https://github.com/rfordatascience/tidytuesday/tree/main/data/2021/2021-04-27 
+  mutate(
+    departure_type = case_when(
+      departure_code == 1 ~ "Death",
+      departure_code == 2 ~ "Illness", 
+      departure_code == 3 ~ "Job performance",
+      departure_code == 4 ~ "Legal violations",
+      departure_code == 5 ~ "Retired",
+      departure_code == 6 ~ "New Opportunity",
+      departure_code == 7 ~ "Other",
+      departure_code == 8 ~ "Unknown Reason",
+      departure_code == 9 ~ "No Reason",
+      TRUE ~ "Other"
+    ),
+    text_length = str_length(notes))
+
+# Verify
+glimpse(departures_clean)
+```
+
+##### Lemmatization
+
+Now that we have a cleaned dataset, we can move on to working with it. We choose to implement lemmatization as it preserves accurate and interpretable results. Given that our goal further on is to find similar documents via topic modeling, lemmatization with UDPipe is the right choice, as it works with big datasets as ours and produces real words that are easy to interpret.
+
+```{r lemmatixe-texts}
+# We download and load an English model
+model <- udpipe::udpipe_download_model(language = "english-ewt")
+ud_model <- udpipe::udpipe_load_model(model$file_model)
+
+# Select text
+ceo_texts <- departures_clean$notes   
+
+# Lemmatize the text
+ud_out <- udpipe::udpipe(ceo_texts, ud_model)
+
+# Reconstruct documents from lemmas
+lemma_texts <- ud_out |>
+  group_by(doc_id) |>
+  summarise(text = paste(lemma, collapse = " "), .groups = "drop") |>
+  mutate(doc_num = as.integer(str_extract(doc_id, "\\d+"))) |>
+  arrange(doc_num) |>
+  select(-doc_num)
+
+# Add to departures_clean for easier access and comparison
+departures_clean$lemma_text <- lemma_texts$text
+```
+
+Now that we have our lemmatized texts, we can build a corpus.
+
+##### Building a Corpus
+
+When building our corpus, we choose to remove punctuation, symbols, URLs, and separators, but retain numbers. Numerical information such as executive ages, tenure lengths, and financial amounts might provide useful context about departure circumstances in these corporate announcements. Additionally, as recommended in Week 11 lecture, we choose to keep the stopwords, excluding only a small set of them that are extremely frequent.
+
+```{r build-corpus}
+# Create corpus from lemmatized text
+corp_lemma <- corpus(departures_clean, text_field = "lemma_text")
+
+# Next, we can tokenize the texts
+tokens_lemma <- tokens(
+  corp_lemma,
+  remove_punct = TRUE,
+  remove_symbols = TRUE,
+  remove_numbers = FALSE,
+  remove_url = TRUE,
+  remove_separators = TRUE
+) |>
+  tokens_tolower()
+
+# We remove extra frequent words
+ultra_stop <- c("the","a","an","to","of","in","and","for","on","is","it", "ceo", "chief", "executive", "officer")
+
+# Next, we remove domain-specific stopwords
+tokens_lemma <- tokens_remove(tokens_lemma, ultra_stop)
+```
+
+Next in our pre-processing, we choose to create unigrams and bigrams. We do that to capture meaningful phrases common in corporate announcements. Bigrams like "poor performance" and "step down" might offer distinct meanings that would be lost if these words appeared separately.
+
+As we create these n-grams and DFM, we choose to removes words appearing in fewer than 2 documents. We decide to apply such minimal feature trimming, as this preserves vocabulary for topic modeling while eliminating obvious noise. LDA, which we will apply later, handles rare terms without requiring aggressive pre-filtering.
+
+```{r n-grams}
+# We create n-grams (unigrams + bigrams)
+tokens_ngrams <- tokens_ngrams(tokens_lemma, n = 1:2)
+
+# Now we create DFM
+dfm_ceo <- dfm(tokens_ngrams)
+
+# Next we display top features
+topfeatures(dfm_ceo, 20)
+
+# We also choose to trim super rare features that appear in less than 2 documents
+dfm_ceo <- dfm_trim(
+  dfm_ceo,
+  min_docfreq = 2, # Appears in ≥2 docs
+  docfreq_type = "count"
+)
+
+# Final dimensions
+dim(dfm_ceo)
+```
+
+### Applying LDA: Latent Dirichlet Allocation
+
+Now, we are ready to find similar documents. To do that, we will use LDA: Latent Dirichlet Allocation. We choose Latent Dirichlet Allocation (LDA) to identify similar CEO departure narratives because corporate announcements follow patterns based on departure circumstances. LDA will help us to discover these thematic patterns without requiring pre-defined categories.
+
+We want to identify which departures are similar to each other and LDA directly answers this by grouping documents with shared vocabulary patterns into topics. Documents that we can assign to the same topic are similar because they might discuss departures under similar circumstances, such as planned retirements versus performance-related exits. Since we have numeric data such as departure code, we will be able to test whether LDA's topic assignments align with the hand-coded departure reasons (departure_code), providing validation that the model identifies substantively meaningful groupings. If topics correspond to specific departure codes (e.g., retirements, performance issues, legal violations), this would confirm that LDA successfully discovers the underlying circumstances that might make departures similar.
+
+For LDA, we evaluate K = 4, 6, and 8 through manual comparison of topic interpretability.
+
+```{r applying-lda}
+# We create a function to fit LDA with different K values
+fit_lda_model <- function(dfm_lda, k, n_terms = 15) {
+  set.seed(42)
+  
+  # Fit LDA
+  lda_model <- LDA(
+    dfm_lda,
+    k = k,
+    method = "Gibbs",
+    control = list(
+      seed = 42,
+      burnin = 1000,
+      iter = 3000,
+      thin = 100
+    )
+  )
+  
+  # We next get top terms as matrix
+  terms_matrix <- topicmodels::terms(lda_model, n_terms)
+  
+  # We convert to tibble for better display
+  terms_tibble <- as_tibble(terms_matrix) |>
+    mutate(rank = row_number()) |>
+    select(rank, everything())
+  
+  return(list(
+    model = lda_model,
+    terms = terms_tibble
+  ))
+}
+
+# Convert dfm to needed format
+dfm_lda <- convert(dfm_ceo, to = "topicmodels")
+
+# Try different K values
+lda_k4 <- fit_lda_model(dfm_lda, k = 4, n_terms = 15)
+lda_k5 <- fit_lda_model(dfm_lda, k = 5, n_terms = 15)
+lda_k6 <- fit_lda_model(dfm_lda, k = 6, n_terms = 15)
+lda_k7 <- fit_lda_model(dfm_lda, k = 7, n_terms = 15)
+lda_k8 <- fit_lda_model(dfm_lda, k = 8, n_terms = 15)
+
+# View terms for comparison
+lda_k4$terms
+lda_k5$terms
+lda_k6$terms
+lda_k7$terms
+lda_k8$terms
+```
+
+Following Week 11 guidance that "interpretability always wins" over quantitative metrics, we select K = 6 based on qualitative assessment of topic coherence and distinctiveness. Specifically, we chose K=6 because:
+
+-   K=4 produced overly broad topics with mostly generic terms ('be', 'he', 'company') that were difficult to distinguish thematically
+-   K=7-8 separated notes into overlapping topics with more vocabulary redundancy
+-   K=6 created the best balance, producing six topics with distinct, interpretable vocabulary
+
+| Topic | Interpretation / Theme | Example Top Words |
+|----|----|----|
+| **1. Financial & Business Context** | Departures discussed with financial details, business metrics, and company changes | s, have, company, be, say, its, year, that, million, new, would |
+| **2. Board Succession Planning** | Formal board announcements of transitions, planned successions, effective dates | board, will, s, president, director, announce, as, board_director, company, have |
+| **3. Resignation Language** | General resignation announcements, departures without extensive detail | be, company, mr, that, not, he, this, resign, leave, with, departure, resignation |
+| **4. Step-Downs & Retirements** | CEOs stepping down or retiring, often with continued involvement | he, as, year, after, down, step, step_down, retire, from, position |
+| **5. Merger & Acquisition Activity** | CEO changes during M&A transactions, acquisitions, shareholder agreements | inc, be, merger, share, stock, with, billion, agreement, acquire, by |
+| **6. Leadership Transitions** | Succession to new roles, becoming chairman, serving in positions | as, from, chairman, president, serve, mr, be, company, serve_as, since |
+
+After fitting the LDA model, we assign each departure narrative to its most prominent topic. Since LDA is probabilistic, each document has a distribution across all topics, but we use the topic with the highest probability as the document's "dominant topic" for interpretation.
+
+One technical note: during preprocessing, one document became completely empty after stopword removal and was automatically excluded from the LDA analysis. We therefore have 7,778 documents in our topic model (compared to 7,779 in the original cleaned dataset). We account for this by identifying which documents the model actually analyzed and only assigning topics to those.
+
+This creates our final dataset where each CEO departure is labeled with its topic assignment, allowing us to validate whether LDA's unsupervised groupings align with the hand-coded departure reasons and look for simmilar documents.
+
+```{r show-dominant-topics-within-other-info}
+# We choose the optimal k
+lda_model <- lda_k6$model
+
+# We get topic proportions for each document in the LDA
+doc_topics <- topicmodels::posterior(lda_model)$topics
+
+# Get metadata from dfm_ceo
+ceo_metadata <- as.data.frame(docvars(dfm_ceo))
+
+# Find non-empty docs
+row_sums <- slam::row_sums(dfm_lda)
+non_empty_idx <- which(row_sums > 0)
+
+# Filter metadata to match LDA docs
+ceo_metadata_lda <- ceo_metadata[non_empty_idx, ]
+
+# Build topic-labeled table
+topic_df <- cbind(
+  ceo_metadata_lda,
+  dominant_topic = topicmodels::topics(lda_model, 1)
+)
+
+topic_df <- tibble::as_tibble(topic_df)
+
+# View
+head(topic_df, 10)
+```
+
+We can create summary of what identified topics align with which departure codes.
+
+```{r summary-topics-and-departure-codes}
+# We create summary of the topics
+topic_df |>
+  count(departure_code, departure_type, dominant_topic) |>
+  group_by(departure_code) |>
+  slice_max(n, n = 1) |>  # Most common topic per code
+  select(departure_code, departure_type, dominant_topic) |>
+  tibble()
+```
+
+##### Validating Topics Against Departure Codes
+
+To assess whether LDA discovered meaningful patterns, we examine how the departure reasons (departure_code) distribute across our six topics.
+
+```{r plot-topics-by-departure-code}
+# We create a visualisation of topic distribution by departure code
+topic_df |>
+  count(dominant_topic, departure_code) |>
+  group_by(dominant_topic) |>
+  mutate(prop = n / sum(n)) |>
+  ggplot(aes(x = factor(dominant_topic), y = prop, fill = factor(departure_code))) +
+  geom_col() +
+  scale_y_continuous(labels = scales::percent) +
+  scale_fill_viridis_d() +
+  labs(
+    title = "Topic Composition by Departure Code",
+    subtitle = "Proportion of each departure code within each topic",
+    x = "Topic",
+    y = "Proportion",
+    fill = "Departure Code"
+  ) +
+  theme_minimal()
+```
+
+##### Visualisation Analysis
+
+The visualisation shows us that LDA found meaningful patterns. Each topic aligns with some departure codes:
+
+**Strong alignments:**
+
+-   Topic 5 which we identified as M&A topic is mostly Code 7 (bright green) which indicates the collective 'Other' category
+-   Topic 2, 4, 6 are heavily Code 5, which indicates retirement
+
+**Mixed topics:**
+
+-   **Topic 1, 3** are mixed but have lots of Code 3, which indicates departure due to the job performace
+
+Overall, we can see that Topics 1, 2, 3, 4 and 6 all contain significant amounts of Code 5 (Retired). This isn't a problem, because if we look at how the departure codes are distributed throughout our dataset, we will see that retirement is the most popular option, as it represents 46% of CEO departures.
+
+```{r plot-distribution-of-departure-codes}
+# Bar plot of departure codes
+topic_df |>
+  count(departure_code, departure_type) |>
+  mutate(prop = n / sum(n)) |>
+  ggplot(aes(x = reorder(departure_type, n), y = n,  fill = factor(departure_code))) +
+  geom_col() +
+  geom_text(aes(label = paste0(" (", round(prop*100, 1), "%)")), hjust = -0.1, size = 3) +
+  coord_flip() +
+  scale_fill_viridis_d() +
+  labs(
+    title = "Distribution of CEO Departure Types",
+    x = "Departure Type",
+    y = "Count",
+    fill = "Code"
+  ) +
+  theme_minimal()
+```
+
+**Identifying Similar Departures**
+
+Now that we've identified six topics, we can find which specific CEO departures are similar to each other by examining which documents share the same dominant topic or have similar topic distributions.
+
+```{r notes-by-same-dominant-topic}
+# Top 5 departures per topic
+doc_topics <- posterior(lda_model)$topics
+
+topic_df <- topic_df |>
+  mutate(
+    topic_1 = doc_topics[, 1],
+    topic_2 = doc_topics[, 2],
+    topic_3 = doc_topics[, 3],
+    topic_4 = doc_topics[, 4],
+    topic_5 = doc_topics[, 5],
+    topic_6 = doc_topics[, 6]
+  )
+
+# Now we show top 5 by probability
+all_top_examples <- map_df(1:6, function(i) {
+  topic_df |>
+    arrange(desc(.data[[paste0("topic_", i)]])) |>
+    slice_head(n = 3) |>
+    mutate(
+      topic = i,
+      probability = .data[[paste0("topic_", i)]]
+    ) |>
+    select(topic, coname, fyear, departure_code, departure_type, probability, notes)
+})
+
+all_top_examples
+```
+
+Looking at the top examples for each topic, we see interesting probability patterns.
+
+Topic probabilities range from 0.47 to 0.72, with most falling between 0.57-0.71. The highest probability is 0.72 for Castle (A M) & Co's departure (Topic 3), while the lowest among top examples is 0.47 for Knight-Swift's retirement (Topic 4). These moderate probabilities show that departures don't fit perfectly into single topics - they mix multiple narrative elements.
+
+What this means: CEO departure announcements often blend themes. For example, Kimco Realty's retirement (Topic 4, probability 0.50) sits right at the boundary, suggesting it combines retirement language with other narrative elements. Similarly, Jones Group's departure (Topic 4, probability 0.49) barely qualifies as its dominant topic, indicating it draws equally from multiple themes. This mixing is realistic since a retirement might also discuss financial performance, or a resignation might include succession planning details. The moderate probabilities (not 0.90+) show that LDA captures this complexity rather than forcing each departure into rigid categories.
+
+Now, let's look at the documents specifically. For readability purposes, we will do it topic by topic.
+
+**Topic 1**
+
+```{r similar-documents-comparison-topic1}
+# We display Topic 1 examples only
+cat("=== TOPIC 1: Most Representative Departures ===\n")
+
+topic_1_examples <- all_top_examples %>% filter(topic == 1)
+
+for(j in 1:3) {
+  cat("\nExample", j, ":", topic_1_examples$coname[j], 
+      "(", topic_1_examples$fyear[j], ")\n")
+  cat(topic_1_examples$notes[j], "\n")
+ }
+```
+
+These three departures share a pattern of framing CEO exits through specific financial metrics and business performance. All three include concrete numbers - Pier 1 mentions "sales fell 6.7 percent" and "profits declined nearly 50 percent," Starbucks references "stock plummet 50 percent," and State Street provides detailed growth figures (3.2 trillion asset increase and earnings growth from \$1.64 to 2.29). Interestingly, two involve clear problems (Pier 1's declining sales, Starbucks' stock drop) while one emphasizes success (State Street's growth), yet they mostly belong to one topis because all three use quantitative business language to contextualize the departure.
+
+**Topic 2**
+
+```{r similar-documents-comparison-topic2}
+# We display Topic 2 examples only
+cat("=== TOPIC 2: Most Representative Departures ===\n")
+
+topic_2_examples <- all_top_examples %>% filter(topic == 2)
+
+for(j in 1:3) {
+  cat("\nExample", j, ":", topic_2_examples$coname[j], 
+      "(", topic_2_examples$fyear[j], ")\n")
+  cat(topic_2_examples$notes[j], "\n")
+ }
+```
+
+These three departures share a pattern of formal board announcements emphasizing succession mechanics and timing details. All three notes explicitly state that "the Board of Directors has appointed/selected" the successor and specify exact effective dates. The language seems to be procedural and announcement-focused, using phrases like "announced today that," "will be nominated to serve," and "has been appointed." Another shared element is the clear identification of who takes over. What distinguishes Topic 2 from other narratives is this emphasis on the formal succession process and board decision-making.
+
+**Topic 3**
+
+```{r similar-documents-comparison-topic3}
+# We display Topic 3 examples only
+cat("=== TOPIC 3: Most Representative Departures ===\n")
+
+topic_3_examples <- all_top_examples %>% filter(topic == 3)
+
+for(j in 1:3) {
+  cat("\nExample", j, ":", topic_3_examples$coname[j], 
+      "(", topic_3_examples$fyear[j], ")\n")
+  cat(topic_3_examples$notes[j], "\n")
+ }
+```
+
+These three departures share a pattern of ambiguous circumstances where the notes explicitly question or speculate about the true reasons for exit. All three seem to express doubt about official explanations, Castle's note suggests the resignation likely wasn't voluntary, Toys R Us indicates a policy or behavioral breach occurred, and Philadelphia Insurance emphasizes the company refused to provide any rationale. Another shared thing is formal legal language about separation agreements and compensation arrangements, suggesting complicated exits requiring legal documentation. What distinguishes Topic 3 is this combination of official ambiguity plus speculation.
+
+**Topic 4**
+
+```{r similar-documents-comparison-topic4}
+# We display Topic 4 examples only
+cat("=== TOPIC 4: Most Representative Departures ===\n")
+
+topic_4_examples <- all_top_examples %>% filter(topic == 4)
+
+for(j in 1:3) {
+  cat("\nExample", j, ":", topic_4_examples$coname[j], 
+      "(", topic_4_examples$fyear[j], ")\n")
+  cat(topic_4_examples$notes[j], "\n")
+ }
+```
+
+These three departures share a pattern of founder-CEOs stepping down after long tenures while remaining with the company in different roles. All three involve executives who founded or led their companies for many years. Another common element seems to be the continued involvement. The departures are framed as planned transitions rather than sudden exits, with language suggesting it was simply time for a change after extended leadership. What specifies Topic 4 is this founder succession pattern. Additonaly, these notes seem to be significantly shorter than the ones representative of previus 3 topics.
+
+**Topic 5**
+
+```{r similar-documents-comparison-topic5}
+# We display Topic 5 examples only
+cat("=== TOPIC 5: Most Representative Departures ===\n")
+
+topic_5_examples <- all_top_examples %>% filter(topic == 5)
+
+for(j in 1:3) {
+  cat("\nExample", j, ":", topic_5_examples$coname[j], 
+      "(", topic_5_examples$fyear[j], ")\n")
+  cat(topic_5_examples$notes[j], "\n")
+ }
+```
+
+These three departures share a pattern of highly detailed merger and acquisition language with significant legal and financial specifics. All three notes read like formal corporate filings and not narrative announcements. Another common thing is the focus on corporate structure changes rather than the departing CEO personally, it seems that the notes emphasize what happens to companies, and stockholders during the transaction. What distinguishes Topic 5 is this heavy use of legal-financial terminology and transaction mechanics, suggesting these are CEO exits driven by corporate restructuring where the departure is a consequence of the deal.
+
+**Topic 6**
+
+```{r similar-documents-comparison-topic6}
+# We display Topic 6 examples only
+cat("=== TOPIC 6: Most Representative Departures ===\n")
+
+topic_6_examples <- all_top_examples %>% filter(topic == 6)
+
+for(j in 1:3) {
+  cat("\nExample", j, ":", topic_6_examples$coname[j], 
+      "(", topic_6_examples$fyear[j], ")\n")
+  cat(topic_6_examples$notes[j], "\n")
+ }
+```
+
+These three departures share a pattern of detailed career chronologies listing positions held over time. All three notes read like professional biographies rather than departure announcements, providing extensive timelines of roles. Another common thing is the emphasis on internal progression, these executives moved through multiple roles within their organizations or industries before becoming CEO. The notes focus on where executives served and when rather than why they're leaving or what happens next to the company. What distinguishes Topic 6 is this biographical, resume-style format that documents career paths in detail.
+
+**Summary**
+
+Now that we have looked though the sample representative documents within each topic, we can create a table explaining each topic with more accuarcy than before.
+
+| Topic | Interpretation / Theme |
+|----|----|
+| **1. Performance-Driven Departures** | CEO exits framed through business performance metrics, financial results, and company struggles or achievements. Notes include specific percentages, dollar amounts, and quantitative business context. |
+| **2. Formal Board Announcements** | Procedural succession announcements emphasizing board decisions, exact effective dates, and formal appointment language. Focus on governance mechanics rather than departure reasons. |
+| **3. Ambiguous Resignations** | Departures with unclear or questioned circumstances, often involving speculation about true reasons, separation agreements, or company refusal to explain. Legal language and suspicion present. |
+| **4. Founder Transitions** | Long-serving or founding CEOs stepping down after extended tenures while remaining involved as chairman or board members. Emphasizes voluntary reduction of role after years of leadership. |
+| **5. Merger & Acquisition Exits** | CEO departures occurring during corporate mergers, acquisitions, or restructuring. Heavy legal-financial language detailing transaction mechanics, stock conversions, and corporate entity changes. |
+| **6. Career Biography Format** | Departure notes structured as detailed professional chronologies, listing positions held over time with specific dates and role progressions rather than explaining why the CEO is leaving. |
+
+### Key Findings: What Similarity Analysis Shows Us
+
+LDA identified six distinct narrative patterns in CEO departure announcements, showing which departures are similar to each other based on shared language and circumstances.
+
+How we identify similar documents: Departures with high probability for the same topic are similar because they use similar vocabulary and describe similar situations. For example, departures in Topic 1 (Performance-Driven) are similar to each other because they all frame exits through financial metrics and business results, these departures share the pattern of using quantitative business language. Similarly, Topic 5 (M&A Exits) groups together departures that occurred during mergers because they all use legal transaction language and focus on corporate restructuring mechanics.
+
+What this reveals about departure communication: Most CEO departures within our dataset might follow one of six recognizable templates rather than being unique narratives. It is also important to remember probabilities of topics and how they migh mix and match. Overall, the fact that departures combine into the groups shows corporate communication might be formulaic, companies facing similar circumstances (mergers, retirements, performance issues) use similar narrative structures and vocabulary.
+
+Why similarity matters: Understanding these patterns might help stakeholders recognize what type of departure they're reading about. When a departure note emphasizes board decisions and effective dates (Topic 2), it signals a different situation than one questioning official explanations (Topic 3) or listing career achievements (Topic 6).
+
+This sets the foundation for anomaly detection: if many departures resemble one or more these six patterns, which ones don't?
+
+------------------------------------------------------------------------
+
+## Part A: Anomalies
+
+Now that we have identified typical patterns in CEO departures through LDA, we want to find departures that don't follow these patterns. To do that, we will use Isolation Forest. We choose Isolation Forest over other anomaly detection methods because it works with anomalies in high-dimensional data like ours.
+
+Our dataset presents challenges that Isolation Forest handles well. First, we have 7,778 documents with 30,870 features after creating our DFM. Methods like DBSCAN might struggle with this many dimensions because distance calculations become unreliable, meaning everything looks equally far apart in high-dimensional space. Isolation Forest doesn't rely on distance measures, instead it works by randomly partitioning the data into trees. I remember that nomalies are easier to isolate (requiring fewer splits), so they might end up with shorter path lengths in the trees. This tree-based approach makes it well suited for text data where we have many features.
+
+Second, Isolation Forest requires minimal tuning. We only need to set the contamination parameter (the expected proportion of anomalies), which we can reasonably estimate as around 5% of departures. Given that our goal is to identify unusual departures and compare them with the typical patterns we found through LDA, Isolation Forest gives us clear anomaly scores that we can interpret.
+
+```{r run-isolation-forest}
+# First, we create a TF-IDF weighted version of our DFM
+dfm_tfidf <- dfm_tfidf(dfm_ceo)
+
+# We convert to matrix format that Isolation Forest can use
+dfm_matrix <- as.matrix(dfm_tfidf)
+
+# We now fit Isolation Forest
+set.seed(42)
+iso_model <- isolation.forest(
+  dfm_matrix,
+  ntrees = 300,
+  sample_size = 256
+)
+
+# As a next step we get anomaly scores for all documents
+iso_scores <- predict(
+  iso_model,
+  newdata = dfm_matrix,
+  type = "score"
+)
+
+# Then ,we flag top 5% as anomalies (using 95th percentile threshold)
+threshold <- quantile(iso_scores, 0.95)
+
+# Find which documents are in both
+row_sums <- slam::row_sums(dfm_lda)
+non_empty_idx <- which(row_sums > 0)
+
+# We now add isolation forest results to topic_df
+topic_df$iso_score <- iso_scores
+topic_df$iso_outlier <- iso_scores > threshold
+
+# Laslty, we produce summary statistics
+cat("Total documents analyzed:", nrow(topic_df), "\n")
+cat("Number of anomalies (top 5%):", sum(topic_df$iso_outlier), "\n")
+cat("Anomaly score range:", round(min(iso_scores), 3), "to", round(max(iso_scores), 3), "\n")
+cat("Threshold for anomalies:", round(threshold, 3), "\n")
+```
+
+So the results of our Isolation Forest are interesting. The narrow score range (0.293-0.335) is curious, it might suggest that even "anomalous" CEO departures aren't that different from typical ones. Technically, they're all corporate announcements following professional conventions, and might not be as varied as say social media posts. But within those documents, Isolation Forest still identified the 387 most unusual narratives.
+
+We can plot these anomalies against text length and anomaly score.
+
+```{r anomaly-departure-plot}
+# We create the plot of anomalies
+ggplot(
+  topic_df, aes(x = text_length, y = iso_score, color = iso_outlier)) +
+  geom_point(alpha = 0.6, size = 2) +
+  geom_hline(yintercept = threshold, linetype = "dashed", color = "gray50") +
+  scale_color_viridis_d(alpha = 0.7) +
+  labs(
+    title = "Isolation Forest: Anomaly Detection Results",
+    x = "Text Length (characters)",
+    y = "Anomaly Score",
+    color = "Classification"
+  ) +
+  theme_minimal()
+```
+
+The plot shows us a clear pattern, longer departure notes tend to be anomalous. Most normal departures (purple dots) cluster below 1,000 characters with low anomaly scores around 0.30. Anomalies (yellow dots) appear mostly in two areas: very long notes (1,500-3,000+ characters) with high scores above the threshold line, and a smaller group of medium-length notes (500-1,500 characters) that also crossed the anomaly threshold. This makes sense because extensive explanations are more rare, most departures don't require 2,000-3,000 character stories unless circumstances are complex or controversial. The narrow anomaly score range (0.293-0.339) indicates that even anomalies aren't dramatically different from normal departures, they're just outside the typical pattern, which reflects the more formulaic nature of corporate communication.
+
+As a next step we can now examine what makes these 387 anomalous, which topics do they belong to? What's in their text? But before that, we need to understand what makes notes "anomalous"? We assume that it could be:
+
+-   Uses rare/unusual words are not seen in other documents much
+-   Very short or very long compared to others
+-   Written in a different style (more casual? more legal?)
+
+We start by looking at the actual text of the departure notes and comparing our identified 'anomalies' with regular notes. To understand what makes certain CEO departures anomalous, we examine the top 10 most unusual narratives identified by Isolation Forest and compare them with the 10 most typical departures.
+
+```{r anomaly-departures-text-length}
+# Get the most anomalous departures
+top_anomalies <- topic_df |>
+  arrange(desc(iso_score)) |>
+  select(coname, fyear, departure_type, dominant_topic, iso_score, notes, text_length) |>
+  head(10)
+
+# Get some NORMAL departures for comparison
+normal_examples <- topic_df |>
+  filter(!iso_outlier) |>
+  arrange(iso_score) |>  # Most "normal"
+  select(coname, fyear, departure_type, dominant_topic, iso_score, notes, text_length) |>
+  head(10)
+
+# We can compare them, lets start with text length
+
+cat("Anomalous documents text lengths:", top_anomalies$text_length)
+cat("\nNormal documents text lengths:", normal_examples$text_length, "\n")
+
+# And also look at averages 
+cat("\nAnomalous meman", mean(top_anomalies$text_length))
+cat("\nNormal mean", mean(normal_examples$text_length))
+```
+
+In agreeent with the plot, we can see that a huge difference between 'anomalies' and 'normal' notes is the difference in text length. It seems that the 'anomalies' are on average longer. The longest anomalous narrative contains 3,086 characters. This suggests that Isolation Forest identifies departures with unusually detailed narratives as anomalous. While most CEO departure announcements follow more brief, formulaic templates (as we found through LDA), some departures involve extensive explanations, additional context, or complex circumstances that require longer narratives to convey.
+
+Next, we look at the notes themselves to compare them.
+
+```{r anomaly-departure-notes}
+# Print the notes from anomalous departures
+for(i in 1:3) {  
+  cat("ANOMALY", i, " - ", top_anomalies$coname[i], "\n")
+  cat(substr(top_anomalies$notes[i], 1, 800), "...\n\n")
+}
+
+for(i in 1:3) {
+  cat("NORMAL",  i, " - ", normal_examples$coname[i], "\n")
+  cat(normal_examples$notes[i], "\n\n")
+}
+```
+
+The most anomalous narratives depicted above show a clear pattern: anomalies are characterized by extensive, detailed explanations rather than brief announcements.
+
+The top 10 anomalous departures average 1739.9 characters, while typical departures average only 114.1 characters. Wilmington Trust's departure note details financial fraud, and regulatory investigations. Bed Bath & Beyond's note explains activist investor pressure and immediate CEO removal. These lengthy narratives suggest companies write more when circumstances are complicated, fraud requires explanation, activist pressure needs context.
+
+In contrast, normal departures are brief and formulaic. These short announcements follow templates, state the fact and move on.
+
+This pattern shows that text length might signal departure complexity. Straightforward retirements and routine successions use minimal language because no explanation is needed. Departures involving fraud, activist pressure, or other circumstances require longer narratives to justify decisions or provide context. Isolation Forest identifies these lengthy, detailed notes as anomalous because they deviate from the brief announcements that dominate the dataset.
+
+We can also consider how many anomalies are in notes from each of the departure codes.
+
+```{r anomalies-across-departure-codes}
+# We look at the anomalies across the departure codess
+topic_df |>
+  count(departure_code, departure_type, iso_outlier) |>
+  group_by(departure_code) |>
+  filter(iso_outlier == TRUE) |>
+  arrange(desc(n))
+```
+
+Looking at departure types, "Other" - Code 7 and "Retire" - Code 5 categories show the highest number of anomalies rates, while "Death" - Code 1 does not have any anomalies. This aligns with our finding: retirements represent a huge amount of ceo departures, it would make sense for it to include many anomalies. Unusual circumstances under "Other" might require more explanations, and thus have longer texts and be considered as anomalies.
+
+We can also look into how our identified anomalies are distributed across 6 topics identified through LDA.
+
+```{r anomalies-across-topics}
+# We look at how anomalies are distributed across the 6 topics 
+topic_df |>
+  count(dominant_topic, iso_outlier) |>
+  group_by(dominant_topic) |>
+  mutate(
+    total = sum(n),
+    prop_anomalous = n / total
+  ) |>
+  filter(iso_outlier == TRUE) |>
+  arrange(desc(prop_anomalous))
+
+# And visualise it for stakeholders
+topic_df |>
+  count(dominant_topic, iso_outlier) |>
+  group_by(dominant_topic) |>
+  mutate(prop = n / sum(n)) |>
+  ggplot(aes(x = factor(dominant_topic), y = n, fill = iso_outlier)) +
+  geom_col(position = "dodge") +
+  scale_fill_viridis_d(alpha = 0.7) +
+  labs(
+    title = "Anomaly Distribution Across Topics",
+    x = "Topic",
+    y = "Number of Documents",
+    fill = "Anomaly"
+  ) +
+  theme_minimal()
+```
+
+The visualisation shows us that anomaly rates vary substantially by topic, suggesting certain departure circumstances produce more unusual narratives than others.
+
+**Topics with highest anomaly rates:**
+
+-   Topic 5 (M&A): 8.9% anomalous - the highest rate across all topics
+-   Topic 1 (Performance-Driven Departures): 7.5% anomalous
+-   Topic 3 (More Ambiguous Resignations): 6.7% anomalous
+
+**Topics with lowest anomaly rates:**
+
+-   Topic 4 (Founder Transitions): 1.2% anomalous
+
+This pattern makes sense given what we observed about narrative length and detail. Mergers and acquisitions (Topic 5) might involve complex financial transactions requiring extensive explanations of deal terms, and shareholder agreements, hence the high anomaly rate. Similarly, resignations and performance issues (Topic 1) often need justification, leading to longer, more detailed notes.
+
+In contrast, planned retirements from founder transitions (Topic 4) might follow highly standardized templates. When a CEO retires after a long run with smooth succession planning, companies might use more brief, formulaic announcements.
+
+These anomaly findings demonstrates an important relationship between our two methods: LDA identified which departure types exist (the six topics), while Isolation Forest reveals which types are most variable. Retirements are both common (largest topic) and has anomalies, while M&A departures are less common but highly variable in how they're communicated.
+
+### Comparing What Similarity and Anomaly Detection Show Us
+
+Using LDA to find similar documents and Isolation Forest to find unusual ones gives us two different views of the same data. Each method sees things the other misses, and comparing them helps us understand CEO departure communication more fully.
+
+**What similarity analysis can see that anomaly detection cannot**
+
+LDA groups departures by shared vocabulary and themes, showing us the underlying structure of corporate communication. It revealed that most departures follow one of six recognizable patterns: M&A transactions, board succession announcements, ambiguous resignations, founder transitions, performance-driven exits, and career biography formats. This thematic view helps us understand what types of departures exist.
+
+However, LDA treats all documents assigned to the same topic as similar, even if some are much more detailed than others. For example, a brief two-sentence M&A announcement and a 3,000-character explanation of merger terms might both land in Topic 5. LDA sees them as similar because they share M&A vocabulary, but they're quite different in how much they reveal.
+
+**What anomaly detection can see that similarity analysis cannot**
+
+Isolation Forest looks at the overall feature patterns of each document, identifying departures that use unusual combinations of words or unusual amounts of detail. It found that anomalies tend to be much longer (averaging 1,740 characters versus 114 for typical departures) and often involve complex circumstances like fraud or regulatory investigations.
+
+However, Isolation Forest doesn't tell us why these documents are unusual or what they're about. It flags the Wilmington Trust departure as anomalous because of its length and rare vocabulary, but it doesn't recognize that this is an M&A-related departure involving financial fraud. The method sees statistical unusualness without understanding thematic content.
+
+**What we learn by using both together**
+
+Combining these perspectives suggests that CEO departure communication operates on two levels. At the broad level, companies seem to choose from a set of recognizable narrative styles based on their circumstances. A merger triggers M&A language; a long-serving founder stepping down introduces transition language. This is what LDA captures.
+
+Within each style, companies then decide how much detail to provide. Most use more brief, standardized language. But some circumstances, perhaps involving controversy, complexity, or legal concerns, require companies to write much more. This variation within styles is what Isolation Forest captures.
+
+The interaction between the two methods is also informative. We found that Topic 5 (M&A) has the highest anomaly rate (8.9%) while Topic 4 (Founder Transitions) has the lowest (1.2%). This suggests that some departure types are inherently more variable than others. Mergers involve complex transactions that sometimes require extensive explanation; planned retirements are more predictable and can follow standard scripts.
+
+**What this comparison teaches us about the social world**
+
+Our findings show us how corporate communication might balance standardization with situation-specific needs. Companies appear to rely on templates, which makes sense because well-executed templates signal professionalism. But when circumstances are complex or controversial, some companies break from the established style by providing much more detail.
+
+For someone reading a CEO departure announcement, these two perspectives might be useful. The general template tells you what broad type of departure occurred. The level of detail might signal whether there's more to the story. A brief M&A note suggests a straightforward transaction; an unusually long one might indicate complications worth investigating.
+
+------------------------------------------------------------------------
+
+## Part B: Research Question
+
+In selecting the dataset to work with, I was drawn to the CEO departures dataset because it includes both curious numeric data and text. Specifically, I would appreciate working with the data that spans multiple decades, as the prominent limitation of the dataset from W8 summative was the fact that it was one entry per person. Our CEO dataset contains text notes and metadata on CEO departures from 1987 to 2020.
+
+This 33-year span is valuable because it captures major events in corporate governance history. The dataset includes the 2008 financial crisis and the more recent period of increased corporate transparency. Coming from Estonia, where corporate governance rules changed significantly after 1991 independence and later joining the EU, I was curious whether similar external pressures shaped how American companies communicate about CEO departures. The 2008 crisis seemed particularly interesting to examine because it was such a major economic shock, I wondered if companies changed how they announced CEO exits during that difficult period compared to normal times.
+
+### Question
+
+**Our main question is:** Do CEO departure narratives fundamentally change during economic crises compared to normal times? Specifically, we investigate whether CEO departures are described differently during the 2008-2009 financial crisis compared to stable economic periods.
+
+### Value for Stakeholders
+
+This question might matter to multiple different groups:
+
+**For boards:** When boards need to announce a CEO departure during a crisis, they face a tough choice, should they be completely transparent about problems or try to reassure stakeholders? By looking at what companies actually said during 2008-2009, we can see what communication approaches were common during the worst financial crisis in recent history. This might help future boards understand what's typical during economic stress.
+
+**For regulators:** If we find that crisis-period announcements use vaguer or more abstract language than normal ones, this could mean companies become less transparent exactly when investors and employees need clear information most. Regulators might use these patterns to evaluate whether disclosure quality drops during economic downturns.
+
+### Approach
+
+We use two methods chosen specifically for our dataset's characteristics and research question.
+
+**First, we use keyness analysis.** Our research question asks how crisis differs from normal, which is a comparative question. Keyness is designed precisely for this: comparing vocabulary between two groups. We chose it because our dataset has clear crisis/normal periods (2008-2009 versus 2003-2007, 2010-2014) and curious text notes that might use different language. For CEO departure announcements, which are carefully worded corporate communications, lexical choices matter significantly, meaning that whether companies say "recession" versus "personal reasons" reveals strategic communication decisions. Keyness helps us identify these specific word choices statistically.
+
+**Second, we use BERTopic.** It discovers topics using document embeddings and clustering to find topics. This matters because BERTopic can capture semantic meaning, meaning words that mean similar things get grouped together even if they're different words. We apply BERTopic to examine whether crisis and normal periods produce different thematic patterns.\
+
+**Then, we use clustering (k-means and k-medoids).** We needed a method that could test whether vocabulary differences translate into distinct communication patterns, but our text data presented challenges. CEO departure notes are sparse and high-dimensional (thousands of possible words, most appearing rarely). We decided to try k-means first, which uses mathematical centroids as cluster centers, but it failed on our data, assigning 90% of departures to one giant cluster. We then tried k-medoids (PAM), which uses actual departure narratives as cluster centers instead of mathematical averages. K-medoids worked much better, producing balanced clusters, showing that our sparse text data needs specific exampkes to use in clustering rather than centroid-based approaches. We chose clustering specifically because our research question asks if crisis creates fundamentally different narratives, if it does, crisis and normal departures should naturally separate into different groups. Additionally, our sample size imbalance (544 crisis versus 3,003 normal) made it important to try clustering each period separately, which only makes sense with a method flexible enough to work on different-sized subsets.
+
+**These methods work together** at different levels of analysis: keyness examines individual words, BERTopic examines themes, and clustering examines document groupings. This multi-level approach helps us understand whether crisis may change surface vocabulary, underlying themes, or both.
+
+### Why Unsupervised Learning
+
+We could build a supervised classifier to predict whether a departure occurred during crisis or normal times, but this would only tell us whether the periods are different, which we already know. Our research question is exploratory: we want to discover what patterns exist in how departures are described and how these relate to economic context.
+
+Unsupervised methods let us explore without imposing our assumptions. Keyness reveals which words distinguish the periods. BERTopic discovers thematic groupings based on semantic similarity rather than our predefined categories. Clustering finds natural groupings in the documents, potentially revealing patterns we wouldn't have thought to look for. These insights happen by letting the data structure itself. The crisis/normal division is our starting point for investigation, not an outcome we're trying to predict.
+
+------------------------------------------------------------------------
+
+### Data Preparation
+
+We decided to prepare our data by focusing on a shorter time period of 2003 to 2014, rather than using all 33 years in the dataset. We chose these years because they include the 2008-2009 financial crisis in the middle, with more stable periods before (2003-2007) and after (2010-2014) for comparison.
+
+We made this choice for practical reasons. Using the full 1987-2020 timespan would mix many different economic periods: the dot-com bubble crash, various small recessions, recovery periods, making it hard to isolate the crisis effect we're interested in. By focusing on 2003-2014, we can more clearly compare what happened right before, during, and right after the 2008-2009 crisis without other major economic events confusing the picture. This narrower window also gives us more balanced pre and post-crisis periods (5 years before, 2 crisis years, 5 years after) rather than comparing 2 crisis years against 31 of more normal years.
+
+We acknowledge this means we're not examining the full dataset or other economic downturns like the early 1990s recession or 2020 COVID impacts, but for answering our specific question about the 2008-2009 crisis, this focused timeframe seems to be appropriate.
+
+```{r data-define-crisis-normal}
+# We create crisis/normal period labels
+ceo_analysis <- departures_clean |>
+  filter(fyear >= 2003, fyear <= 2014) |> # Focus on our analysis period
+  mutate(
+    period = case_when(
+      fyear %in% 2008:2009 ~ "crisis", # Financial crisis years
+      TRUE ~ "normal" # Pre/post crisis (2003-2007, 2010-2014)
+    )
+  )
+
+# We check the distribution of crisis vs normal
+table(ceo_analysis$period)
+```
+
+As we can see, there are 544 text notes that represent CEO departures during the crisis, and 3003 notes that represent normal times.
+
+Next, we will create the corpus.
+
+```{r crisis-corpus-creation}
+#| warning: false
+# We build the corpus
+corpus_ceo <- ceo_analysis |>
+  corpus(
+    text_field = "notes",
+    docvars = c("period", "coname", "exec_fullname", "fyear", "ceo_dismissal")
+  )
+```
+
+Next, as a light preprocessing we will apply tokenization. In this case, we choose to remove numbers.
+
+```{r}
+# We do light preprocessing: remove URLs + punctuation
+toks_ceo <- tokens(
+  corpus_ceo,
+  remove_punct = TRUE,
+  remove_url = TRUE,
+  remove_symbols = TRUE,
+  remove_numbers = TRUE
+)
+
+# Create DFM
+dfm_ceo <- dfm(toks_ceo)
+
+# Check dimensions
+dfm_ceo
+```
+
+We also implement slight trimming to remove very rare words. We decided to created two versions of our DFM with different trimming levels. For keyness analysis, we used lighter trimming `min_termfreq = 5, min_docfreq = 3` to preserve comprehensive vocabulary, including potentially distinctive but rare terms like 'recession.' For clustering, we trimmed more a little more `(min_termfreq = 10, min_docfreq = 5)`. This heavier trimming was necessary because high-dimensional sparse data might cause clustering algorithms to fail.
+
+```{r}
+# We trim DFM: remove very rare terms (appear in < 3 documents)
+dfm_keyness<- dfm_trim(
+  dfm_ceo,
+  min_termfreq = 5, # Term must appear at least 5 times total
+  min_docfreq = 3, # Term must appear in at least 3 documents
+  docfreq_type = "count"
+)
+
+# Check reduced dimensions
+dfm_keyness
+
+# For k-means: we create more aggressively trimmed version
+dfm_clustering <- dfm_trim(
+  dfm_ceo,
+  min_termfreq = 10, # Term must appear at least 10 times total
+  min_docfreq = 5,
+  docfreq_type = "count"
+)
+
+dfm_clustering
+```
+
+------------------------------------------------------------------------
+
+### Keyness Analysis
+
+We now move on to our keyness analysis. We use Log-likelihood Ratio as our dataset has
+
+-   extremely sparse text
+-   many rare words
+-   highly skewed word frequency distributions
+
+```{r}
+# W apply keyness: compare crisis vs normal periods
+# target = TRUE means we're focusing on "crisis" as the target group
+keyness_result <- textstat_keyness(
+  dfm_keyness,
+  target = docvars(dfm_keyness, "period") == "crisis",
+   measure = "lr"
+)
+```
+
+Now, we will visualize keyness.
+
+```{r}
+textplot_keyness(keyness_result,
+                 n = 20,
+                 color = c("#481567FF", "#1F968BFF"))
+```
+
+And we can aslo extract top terms for crisis vs. non crisis notes.
+
+```{r}
+# We extract top crisis-associated terms
+keyness_result |>
+  slice_max(G2, n = 20)
+```
+
+Keyness analysis shows us that strongest distinctive terms for crisis period are mostly company and executive names rather than general crisis vocabulary.
+
+"Wilmington" appears in 15 crisis departures but only 2 normal ones. This might reflect Wilmington Trust Corporation's multiple CEO changes during the financial crisis rather than being a word all companies used. Similarly, "exxon," "motorola," and "metavante" mark specific companies that experienced leadership changes during 2008-2009. Executive names like "kennedy," "parker," and "moffett" also appear as distinctive crisis terms.
+
+The most meaningful general crisis term seems to be 'recession', appearing in 14 crisis departures versus just 1 normal departure. However, this represents only 2.6% of crisis departures, meaning that the vast majority did not explicitly name the recession. This suggests that while some companies acknowledged the economic context, explicit crisis framing was the exception rather than the norm. The fact that company names dominate the keyness results more than recession-related vocabulary might show that crisis departures are marked more by which companies experienced them than by universal changes in how all companies described departures.
+
+Other crisis-associated terms like "rewards," "treasury," and "trust" might relate to compensation restructuring or financial services industry language during the downturn, though without examining specific examples we can't be certain what drives these associations.
+
+Next, we look at the top normal associated terms.
+
+```{r}
+# Extract top normal-associated terms  
+keyness_result |>
+  slice_min(G2, n = 20)
+```
+
+In contrast, normal-period departures use more standardized corporate language. The top distinctive terms include 'assumed', 'personal', 'elected', and 'shareholders'. These terms represent conventional succession narratives: executives 'assume' new roles, depart for 'personal' reasons, are 'elected' to positions, or transitions are framed around 'shareholder' interests. The term 'merger' suggests M&A activity might characterize normal-period departures more than crisis ones.
+
+Executive names appear here too ("george," "west") but less than in crisis results. Terms like "medical" and "systems" might indicate certain industries (healthcare, technology) had more departures during normal periods than crisis.
+
+Overall, this suggests that during crisis, a few specific companies experienced many departures, while during normal times, departures happened more broadly across many companies using more standard language.
+
+Now, with these interesting findings we would like to see how these terms appear in context.
+
+```{r}
+# We find departures containing key crisis terms
+# Mentioning "recession"
+recession_examples <- ceo_analysis |>
+  filter(fyear >= 2008, fyear <= 2009) |>
+  filter(str_detect(notes, regex("recession", ignore_case = TRUE))) |>
+  select(coname, exec_fullname, fyear, period, notes) |>
+  head(3)
+
+# View
+recession_examples
+# Print out notes
+recession_examples$notes
+```
+
+The three crisis departures that explicitly mention "recession" show a common pattern: all use the recession to explain why the CEO had to leave.
+
+These notes differ in length, one is over 3,000 characters detailing financial fraud and merger negotiations, another describes a \$27 million buyout disguised as retirement, and the third simply states the CEO quit after stock dropped from 70 to 2. Despite these differences in detail level, all three frame the departure through external economic forces. The recession is presented as the direct cause of the company's problems (concealed losses, housing market collapse, stock crashes) that made the CEO exit necessary. This seems to shift blame from internal management decisions to uncontrollable external circumstances.
+
+```{r}
+# Normal-period terms - "personal"
+personal_examples <- ceo_analysis |>
+  filter(fyear >= 2003, fyear <= 2014) |>
+  filter(str_detect(notes, regex("personal", ignore_case = TRUE))) |>
+  select(coname, exec_fullname, fyear, period, notes) |>
+  head(3)
+
+personal_examples
+personal_examples$notes
+```
+
+Normal-period departure examples seem to use very different language than crisis departures.
+
+Alberto-Culver Co frames the exit around corporate restructuring (splitting into two companies). American International Group discusses internal fraud and regulatory investigations. Southwest talks about "personal reasons" despite 54% profit decline, explaining it through company-specific labor issues. None mention broader economic conditions or market forces.
+
+The key diference is that crisis departures blame external economic forces ("recession caused the housing bubble burst"). Normal departures focus on individual choices ("personal reasons"), internal company problems (fraud), or company-specific events (corporate split). Even when normal-period companies have serious problems, they don't mention the broader economy, they seem to keep the explanation internal to the company.
+
+### Keyness: Key Finding
+
+Keyness showed us that when crisis communication explicitly references economic conditions, it tends to externalize blame to macroeconomic forces, while normal communication internalizes explanations to individual or company factors. However, we should note that most crisis departures (97%) avoided naming the recession directly, so this externalizing pattern appears in only a small minority of cases. For those departures that do attribute CEO exits to forces beyond their control, this framing allows boards to explain away failures without fully acknowledging management responsibility. During normal times, companies seem more likely to frame departures through individual agency ("personal reasons") or even acknowledge internal problems (fraud, restructuring).
+
+However, we're observing patterns in limited examples, only a small number of crisis departures explicitly mentioned recession, and individual company circumstances varied greatly. The keyness results show which words distinguish the periods statistically, but interpreting why companies chose these framing strategies requires caution.
+
+Now, with k-means we will test whether linguistic patterns we found create systematically distinct narrative clusters.
+
+------------------------------------------------------------------------
+
+### BERTopic: Topic Discovery
+
+In Part A, we used LDA to identify what topics exist across CEO departure narratives. LDA works by finding words that frequently appear together, grouping them into topics. This bag-of-words approach was useful for identifying broad narrative categories like M&A announcements, retirement notices, and performance-related exits.
+
+However, LDA has a limitation for our Part B research question. Because LDA treats each word as completely separate, it can't recognize that "fired" and "terminated" mean similar things, or that "economic downturn" and "recession" refer to the same concept. If crisis and normal periods use different words to express similar ideas, LDA would see them as different topics even when they're thematically identical.
+
+BERTopic addresses this limitation through a fundamentally different approach. I learned that instead of counting words, BERTopic:
+
+1.  Embeds documents using neural language models that capture semantic meaning
+2.  Clusters similar documents based on their meaning, not just shared vocabulary
+3.  Extracts topic words from each cluster using a class-based TF-IDF procedure
+
+This means BERTopic can detect whether crisis and normal departures discuss similar themes even if they use different vocabulary, exactly what we need given our keyness finding that the periods use different words.
+
+We will apply BERTopic to all Part B documents (both crisis and normal) to discover what semantic themes exist.
+
+```{r bertopic-setup}
+#| include: false
+# Disable tokenizers parallelism warning
+Sys.setenv(TOKENIZERS_PARALLELISM = "false")
+
+# We specify what version of python we use
+
+# Note on reproducibility: BERTopic requires a Python environment with bertopic
+# The path below points to my local virtual environment. To reproduce, create your own virtual environment please update the path accordingly, 
+# or use:reticulate::use_virtualenv("your-env-name")
+use_python("/Users/jelizavetatsalaja/.virtualenvs/r-reticulate/bin/python", required = TRUE)
+```
+
+It is important to note that we made some decisions when configuring BERTopic for our data. First, we chose to use smaller batch sizes (batch_size = 16L) due to memory constraints, which made the embedding process slower but more stable.
+
+For the clustering component, we selected HDBSCAN with `min_cluster_size = 50L`, meaning each topic must contain at least 50 documents to be considered a valid cluster. We chose 50 because it felt like a reasonable middle ground: setting it lower (like 30) might create topics based on just a few unusual documents, while setting it higher (like 100) might merge different themes together. With around 3,500 documents in our subset of the dataset, 50 seemed small enough to find distinct patterns but large enough that each topic would have enough examples.
+
+We set `min_samples = 3L` which controls how conservative the clustering is, lower values allow more documents to be assigned to clusters rather than marked as outliers. We used `cluster_selection_method = "eom"`, which tends to produce more balanced cluster sizes compared to the alternative "leaf" method.
+
+```{r bertopic-function}
+# We create function to run BERTopic
+run_bertopic <- function(texts) {
+   # Import necessary Python modules
+  bertopic <- import("bertopic")
+  sentence_transformers <- import("sentence_transformers")
+  hdbscan <- import("hdbscan")
+  
+  # Import UMAP through sklearn's manifold or directly
+  umap_module <- reticulate::import("umap", convert = FALSE)
+  
+  SentenceTransformer <- sentence_transformers$SentenceTransformer
+  embedding_model <- SentenceTransformer("BAAI/bge-m3")
+  
+  embeddings <- embedding_model$encode(
+    texts,
+    show_progress_bar = TRUE,
+    batch_size = 16L
+  )
+  
+  # UMAP with random seed for reproducibility
+  umap_model <- umap_module$UMAP(
+    n_neighbors = 15L,
+    n_components = 5L,
+    min_dist = 0.0,
+    metric = "cosine",
+    random_state = 33L
+  )
+  
+   # HDBSCAN settings
+  hdbscan_model <- hdbscan$HDBSCAN(
+    min_cluster_size = 50L,
+    min_samples = 5L,
+    metric = "euclidean",
+    cluster_selection_method = "eom",
+    prediction_data = TRUE
+  )
+  
+  topic_model <- bertopic$BERTopic(
+    embedding_model = embedding_model,
+    umap_model = umap_model,
+    hdbscan_model = hdbscan_model,
+    calculate_probabilities = TRUE
+  )
+  
+  fit_transform <- topic_model$fit_transform(texts, embeddings)
+  topics <- fit_transform[[1]]
+  probs <- fit_transform[[2]]
+  
+  
+  return(list(model = topic_model, topics = topics, probs = probs))
+}
+
+# Prepare texts for BERTopic
+bertopic_texts <- ceo_analysis$notes
+
+# Run BERTopic on our Part B data
+cat("Running BERTopic on", length(bertopic_texts), "documents...\n")
+bertopic_result <- run_bertopic(bertopic_texts)
+
+# Extract results
+topic_model <- bertopic_result$model
+bertopic_topics <- bertopic_result$topics
+bertopic_probs <- bertopic_result$probs
+
+cat("BERTopic complete.\n")
+```
+
+Now that we sucessfully ran our BERTopic, we can look at the summary.
+
+```{r bertopic-topic-info}
+# Get topic information
+topic_info <- topic_model$get_topic_info()
+
+# View topic summary
+cat("Number of topics found:", nrow(topic_info) - 1, "(excluding outlier topic -1)\n")
+cat("Number of outlier documents:", topic_info$Count[topic_info$Topic == -1], "\n\n")
+
+# Display topic info
+topic_info |>
+  select(Topic, Count, Name) |>
+  head(15)
+```
+
+Looking at the results, it is important to acknowledge that approximately 40% of documents were classified as outliers (topic -1), meaning they didn't fit neatly into any cluster. This is higher than ideal, but it reflects the reality that CEO departure notes often share very similar language which might make differentiation difficult. For our analysis, we focus on the remaining documents that were assigned to topics, while also examining whether the outlier rate differs between crisis and normal periods.
+
+Next, let's look at the words that are representative of each topic.
+
+```{r bertopic-topic-words}
+# Get topic representations in a more readable format
+topic_representations <- map(
+  topic_model$get_topic_info()$Representation,
+  ~ paste(.x, collapse = ", ")
+)
+
+# Print the topics
+for (i in 1:min(15, length(topic_representations))) {
+  cat("Topic", i - 1, ":", topic_representations[[i]], "\n")
+}
+```
+
+BERTopic identified 11 topics in our corpus. Looking at the representative words, we can attempt to interpret what each topic captures, though we should note that many topics share similar vocabulary given the formulaic nature of CEO departure announcements.
+
+| Topic | Top Words | Interpretation |
+|----|----|----|
+| 0 | the, of, and, in, to, as, company, was, ceo, he | Generic language (background) |
+| 1 | of, the, and, will, executive, chief, as, officer, board, president | Future leadership transitions |
+| 2 | the, was, to, company, in, of, and, that, ceo, for | Narrative company-focused words |
+| 3 | the, to, code, of, changed, and, company, in, as, was | Governance/code changes |
+| 4 | of, the, merger, and, acquisition, inc, in, agreement, to, stock | M&A-related departures |
+| 5 | down, voluntarily, ceo, stepped, after, to, his, steps, as, from | Voluntary step-downs |
+| 6 | the, he, as, for, ceo, years, remained, chairman, of, his | CEO-to-chairman transitions |
+| 7 | his, retirement, the, he, to, mr, of, in, was, retire | Personal retirement announcements |
+| 8 | served, and, from, of, since, as, mr, officer, executive, chief | Career history and tenure descriptions |
+| 9 | was, acquired, by, company, merger, the, ceo, he, and, this | Company acquisition/sale departures |
+| 10 | as, retired, chairman, he, of, from, in, the, executive, board | Chairman retirements |
+| 11 | the, mr, of, to, was, in, and, company, for, his | Formal address style announcements |
+
+As we can see, several topics appear quite similar (Topics 0, 2, 11 share a lot of generic vocabulary), which reflects both the similar nature of corporate announcements and the limitations of interpreting topics purely through word lists. However, some topics do capture distinct departure narratives: Topics 4 and 9 both relate to mergers and acquisitions (with Topic 9 emphasising the company being acquired or sold), Topic 5 emphasises voluntary departures, Topic 7 focuses on retirements, and Topic 6 captures transitions where departing CEOs remain as board chairman.
+
+Let's now move on to answering our research question specifically with the topics.
+
+```{r bertopic-add-to-data}
+# We add BERTopic results to our analysis dataframe
+ceo_bertopic <- ceo_analysis |>
+  mutate(
+    bertopic_topic = bertopic_topics,
+    bertopic_prob = apply(bertopic_probs, 1, max) 
+  )
+
+# We also need to verify the alignment
+if(nrow(ceo_bertopic) != length(bertopic_topics)) {
+  stop("ERROR: Row count mismatch")
+}
+```
+
+We will consider how topics are distributed across crisis and normal periods.
+
+```{r bertopic-by-period}
+# We compare topic distribution by period
+topic_by_period <- ceo_bertopic |>
+  filter(bertopic_topic != -1) |>  # We decided to exclude outliers for cleaner comparison
+  count(period, bertopic_topic) |>
+  group_by(period) |>
+  mutate(proportion = n / sum(n)) |>
+  ungroup()
+
+# Calculate overall topic sizes for reference
+topic_sizes <- ceo_bertopic |>
+  filter(bertopic_topic != -1) |>
+  count(bertopic_topic, name = "total") |>
+  arrange(desc(total))
+
+# Now we show top topics by period
+topic_by_period |>
+  pivot_wider(
+    names_from = period,
+    values_from = c(n, proportion),
+    values_fill = list(n = 0, proportion = 0)
+  ) |>
+  arrange(desc(n_crisis + n_normal)) |>
+  head(10)
+```
+
+The most notable differences appear in a few topics. Topic 1 (future leadership transitions) is more present during crisis (24.0% vs 18.4%), suggesting crisis period announcements may focus more on future plans. Topic 4 (M&A departures) and Topic 5 (voluntary step-downs) are also slightly more common during crisis (8.3% vs 7.0% and 8.3% vs 5.9% respectively). In contrast, Topic 2 (narrative company-focused) and Topic 3 (governance/code changes) are less common during crisis (6.4% vs 8.6% and 5.4% vs 8.2% respectively), and Topic 6 (CEO-to-chairman transitions) appears less often during crisis (3.2% vs 6.4%), perhaps indicating that the remaining as chairman was less available during more difficult times.
+
+We can also visualize the results for easier comparison.
+
+```{r bertopic-visualization}
+# We visualize topic prevalence by period
+topic_by_period |>
+  ggplot(aes(x = factor(bertopic_topic), y = proportion, fill = period)) +
+  geom_col(position = "dodge") +
+  scale_fill_manual(values = c("crisis" = "#481567FF", "normal" = "#1F968BFF")) +
+  scale_y_continuous(labels = scales::percent) +
+  labs(
+    title = "BERTopic: Topic Prevalence by Period",
+    x = "Topic",
+    y = "Proportion",
+    fill = "Period"
+  ) +
+  theme_minimal()
+```
+
+Though, we should be careful with these interpretations. The crisis sample is much smaller than the normal period (544 vs 3,003), so the crisis proportions may be less reliable and small percentage differences (e.g., 24% vs 18%) may not be as meaningful given the sampling variability.
+
+Now, let's look at the notes from these different topics. We will calculate which topics differ most in prevalence between crisis and normal periods and look at the specific text note examples.
+
+```{r bertopic-difference}
+# We calculate which topics are most different between periods
+topic_differences <- topic_by_period |>
+  filter(bertopic_topic > 0) |>
+  select(period, bertopic_topic, proportion) |>
+  pivot_wider(names_from = period, values_from = proportion, values_fill = 0) |>
+  mutate(
+    difference = crisis - normal,
+    abs_difference = abs(difference)
+  ) |>
+  arrange(desc(abs_difference))
+
+# Next, we dentify crisis-heavy and normal-heavy topics
+crisis_heavy_topics <- topic_differences |>
+  filter(difference > 0) |>
+  head(2) |>
+  pull(bertopic_topic)
+
+normal_heavy_topics <- topic_differences |>
+  filter(difference < 0) |>
+  head(2) |>
+  pull(bertopic_topic)
+
+# Print example documents from crisis-heavy topics
+cat("=== Example Documents from Crisis-Heavy Topics ===\n")
+for(topic in crisis_heavy_topics) {
+  cat("\n--- Topic", topic, "---\n")
+  examples <- ceo_bertopic |>
+    filter(bertopic_topic == topic, period == "crisis") |>
+    slice_head(n = 2)
+  for(i in 1:nrow(examples)) {
+    cat("\n", examples$coname[i], "(", examples$fyear[i], "):\n")
+    cat(str_trunc(examples$notes[i], 500), "\n")
+  }
+}
+
+# Print example documents from normal-heavy topics
+cat("\n=== Example Documents from Normal-Heavy Topics ===\n")
+for(topic in normal_heavy_topics) {
+  cat("\n--- Topic", topic, "---\n")
+  examples <- ceo_bertopic |>
+    filter(bertopic_topic == topic, period == "normal") |>
+    slice_head(n = 2)
+  for(i in 1:nrow(examples)) {
+    cat("\n", examples$coname[i], "(", examples$fyear[i], "):\n")
+    cat(str_trunc(examples$notes[i], 500), "\n")
+  }
+}
+```
+
+Looking at example documents from topics that differ most between periods shows us some patterns. The crisis-heavy topics contain departures with more difficult circumstances. Topic 1 includes cases like General Motors' CEO who resigned at the White House's request after the company lost over \$82 billion, and Datascope's CEO who faced multiple ethics violation reports and management instability. Topic 5, though labelled as voluntary step-downs, shows long-tenured CEOs stepping down during crisis years.
+
+In contrast, the more 'normal' leaning topics contain more routine transitions. Topic 6 shows planned retirements where CEOs finalise departure plans after industry conditions improve, or where succession has been carefully worked out over a year. Topic 3 captures M&A-related departures where companies were acquired by private equity firms or merged with other companies.
+
+**BERTopic Findings**
+
+BERTopic identified 11 semantic topics in CEO departure narratives. Most topics appear with similar prevalence in both periods, but we found a few interesting patterns. Topics relating to leadership transitions and voluntary step-downs are somewhat more common during crisis, while topics about CEO-to-chairman transitions and governance changes seem to be more common during normal times.
+
+Looking at example documents, crisis-heavy topics tend to contain departures involving external pressure or difficult circumstances. Normal-heavy topics tend to feature more routine transitions with planned successions. However, the differences are modest (all under 6 percentage points), and the same topics appear in both periods.
+
+------------------------------------------------------------------------
+
+### K-means Clustering
+
+So far, keyness has shown us that crisis and normal periods use different vocabulary, and BERTopic has revealed some differences in thematic emphasis. We now turn to clustering to examine whether these differences are strong enough for documents to naturally group by period, or whether crisis and normal departures are mixed together.
+
+First, we apply TF-IDF to our text data, as it downweights common terms and upweights distinctive ones. Then, we convert our data into a matrix.
+
+```{r apply-tf-idf}
+# Apply TF-IDF
+dfm_tfidf_result <- dfm_tfidf(dfm_clustering, scheme_tf = "prop")
+```
+
+We apply LSA for the dimensionality reduction. We decided to use LSA because clustering doesn't work really well with too many dimensions, when there are too many features, everything might look equally far apart and patterns might disappear. LSA helps by finding the main patterns in how words appear together and summarizing them in fewer dimensions. We chose 10 dimensions based on Week 11 recommendations for clustering tasks.
+
+```{r applying-lsa}
+# We apply LSA to reduce dimensions
+lsa_result <- textmodel_lsa(
+  dfm_tfidf_result,
+  nd = 10           
+)
+
+# We extract document coordinates in LSA space
+lsa_docs <- lsa_result$docs
+```
+
+Now, before we conduct k-means clustering, we need to find the best k. For that, we will use elbow and silhouette plots.
+
+```{r elbow-method}
+# We apply elbow method
+fviz_nbclust(
+  lsa_docs,
+  kmeans,
+  method = "wss",          
+  k.max = 10      
+) +
+  labs(
+    title = "Elbow Method for Optimal k",
+    subtitle = "CEO Departure Narratives"
+  )
+
+# We also apply silhouette method for optimal k
+fviz_nbclust(
+  lsa_docs,
+  kmeans,
+  method = "silhouette",
+  k.max = 10
+) +
+  labs(
+    title = "Silhouette Method for Optimal k",
+    subtitle = "CEO Departure Narratives"
+  )
+```
+
+Elbow and silhouette analysis on 10-dimensional LSA coordinates show that k=4 might be the optimal for k-means clustering. The elbow plot shows smaller returns after k=4-5, while silhouette analysis indicates stable cluster quality for k=2-5 (average silhouette ≈ 0.61-0.68). We selected k=4 as it balances capturing meaningful structure while maintaining good cluster interpretability.
+
+```{r k-means-clustering}
+# We run k-means clustering
+set.seed(2025)
+
+kmeans_result <- kmeans(
+  lsa_docs,
+  centers = 4,
+  nstart = 25,
+  iter.max = 100
+)
+
+# Check cluster sizes
+kmeans_result$size
+```
+
+```{r clusters-by-normal-vs-crisis}
+# Add to dataframe to compare
+ceo_kmeans <- ceo_analysis |>
+  mutate(cluster_kmeans = kmeans_result$cluster)
+
+# We also want to verify alingment just in case
+if(nrow(ceo_kmeans) != length(kmeans_result$cluster)) {
+  stop("ERROR: Row count mismatch!")
+}
+
+# Now we are interested in hwo data clustered in regards to period: crisis/normal
+kmeans_comp <- table(ceo_kmeans$cluster_kmeans, ceo_kmeans$period)
+print(kmeans_comp)
+```
+
+We can see that K-means clustering didn't work well for our data. Even though optimization metrics suggested k=4 might be good (silhouette score around 0.62), the actual results were very unbalanced with one cluster containing 3,213 departures (90.6%) while the other three had only 326, 7, and 1 departures each.
+
+Looking at how crisis versus normal departures distributed across these clusters shows an interesting pattern. The giant Cluster 4 contained 481 crisis and 2,732 normal departures, maintaining roughly the same 15% crisis proportion as the overall dataset. Cluster 1 had 61 crisis and 265 normal (about 19% crisis). The tiny clusters (2 and 3) had almost no departures. This distribution suggests that crisis and normal departures don't seem to naturally separate into different groups based on their text patterns.
+
+This finding actually addresses our research question in an unexpected way. Despite the vocabulary differences keyness helped us identify, the clustering failure suggests these lexical differences might not create fundamentally different narrative structures. Companies might use similar templates or organizational patterns for departure announcements regardless of economic context,
+
+However, the severe imbalance in cluster sizes also might indicate that k-means couldn't work well with our sparse text data, which is why we tried k-medoids next.
+
+------------------------------------------------------------------------
+
+### K-medoids Clustering
+
+Now, to test whether the clustering failure was method-specific rather than data-inherent, we decided to apply PAM (k-medoids clustering), which uses actual documents as cluster centers instead of mathematical centroids.
+
+We start by determining an optimal k for PAM, again by using elbow and silhouette methods.
+
+```{r choosing-k-pam}
+# We apply elbow method for PAM
+fviz_nbclust(
+  lsa_docs, # Same 10-dimensional LSA space
+  pam, # Using PAM instead of kmeans
+  method = "wss",
+  k.max = 10
+) +
+  labs(
+    title = "Elbow Method for Optimal k (PAM)",
+    subtitle = "CEO Departure Narratives"
+  )
+
+# Silhouette method for PAM
+fviz_nbclust(
+  lsa_docs,
+  pam,
+  method = "silhouette",
+  k.max = 10
+) +
+  labs(
+    title = "Silhouette Method for Optimal k (PAM)",
+    subtitle = "CEO Departure Narratives"
+  )
+```
+
+The PAM optimization plots suggested some detectable cluster structure. Silhouette analysis showed us k=8 had the highest score (about 0.23), with the elbow plot showing diminishing returns around k=7-8. We chose k=8 as our final clustering solution.
+
+While the silhouette score of 0.23 indicates only modest cluster separation, meaning the boundaries between groups aren't very clear, this was the best structure PAM could find in our data. The weak clustering overall suggests that CEO departure narratives, whether during crisis or normal times, might share considerable similarity in how they're structured.
+
+```{r k-medoids-clustering}
+# We run k-medoids clustering
+pam_result <- pam(
+  lsa_docs,
+  k = 8,
+  metric = "euclidean"
+)
+
+# Check cluster sizes
+print(table(pam_result$clustering))
+```
+
+We can see that PAM clustering with k=8 identified eight narrative groups with varying sizes. The clusters range from very large (Cluster 1 with 1,251 departures, 35.3%) to very small (Cluster 8 with only 4 departures, 0.1%). The distribution shows three substantial clusters (Clusters 1, 3, and 2 with 1,251, 956, and 808 departures respectively), three medium-sized clusters (Clusters 4, 5, and 7 with around 140-150 departures each), one smaller cluster (Cluster 6 with 88 departures), and one tiny cluster (Cluster 8 with 4 departures).
+
+This uneven distribution suggests that while PAM found eight patterns in the data, CEO departure narratives concentrate heavily in a few main types. The three largest clusters likely represent the most common communication templates companies use, while the smaller clusters might capture less frequent but distinct narrative styles.
+
+```{r pam-by-crisis-vs-normal}
+# Add to dataframe to compare
+ceo_pam <- ceo_analysis |>
+  mutate(cluster_pam = pam_result$clustering)
+
+# We also want to verify alingment just in case
+if(nrow(ceo_pam) != length(pam_result$clustering)) {
+  stop("ERROR: Row count mismatch!")
+}
+
+# Now we are interested in hwo data clustered in regards to period: crisis/normal
+table(ceo_pam$cluster_pam, ceo_pam$period)
+```
+
+Looking at how crisis and normal departures distribute across the eight PAM clusters reveals an important pattern related to our research question. All eight clusters contain roughly the same proportion of crisis versus normal departures - around 15% crisis in each cluster, which matches the overall dataset proportion (544 crisis out of 3,547 total = 15.3%).
+
+For example, Cluster 1 has 189 crisis and 1,062 normal (15.1% crisis), Cluster 2 has 126 crisis and 682 normal (15.6% crisis), and this pattern continues across all clusters.
+
+When we cluster all departures together based on their text patterns, crisis and normal periods don't separate into different clusters. Instead, they mix proportionally in every cluster. This suggests that the vocabulary differences keyness identified (crisis using "recession," normal using "personal") don't create fundamentally different narrative types. Companies appear to use similar communication structures regardless of economic period, meaning that the eight clusters likely represent different departure circumstances (M&A, retirements, resignations) that occur in both crisis and normal times, just with different words substituted.
+
+This finding hints that crisis doesn't fundamentally change how companies structure departure announcements, but rather changes which specific words they use within similar structures.
+
+To visualize our cluster structure, we decided to project the 10-dimensional LSA space onto 2 dimensions using UMAP, a non-linear dimensionality reduction technique covered in Week 8. Unlike linear projections (e.g., showing only LSA Dimensions 1-2), UMAP preserves local neighborhood structure and often reveals cluster boundaries more clearly.
+
+```{r umap-visualisation}
+# We will UMAP for visualization only
+
+# Apply UMAP to 10D LSA coordinates
+umap_coords <- umap(
+  lsa_docs,
+  n_neighbors = 15,    # Controls local vs. global structure
+  min_dist = 0.1,      # Minimum distance between points
+  metric = "euclidean"
+)
+
+# Add to visualization dataframe
+viz_data_umap <- ceo_pam |>
+  mutate(
+    UMAP1 = umap_coords[, 1],
+    UMAP2 = umap_coords[, 2],
+    cluster_label = factor(cluster_pam)
+  )
+
+# Plot
+ggplot(viz_data_umap, aes(x = UMAP1, y = UMAP2, color = cluster_label)) +
+  geom_point(alpha = 0.6, size = 2) +
+  scale_color_viridis_d() +
+  labs(
+    title = "PAM Clusters Visualized via UMAP Projection",
+    subtitle = "Non-linear dimensionality reduction preserves cluster structure",
+    x = "UMAP Dimension 1",
+    y = "UMAP Dimension 2",
+    color = "PAM Cluster"
+  ) +
+  theme_minimal()
+```
+
+UMAP projection shows us visible cluster structure. The four PAM clusters show overlapping boundaries, with clusters forming a connected central region and smaller groups. This pattern confirms that PAM identified real but fuzzy groupings, consistent with weaker silhouette scores.
+
+Let's further examine our clusters by extracting the documents that are the centers.
+
+```{r medoid-examples}
+# We first get the 4 medoids (actual departure indices that are cluster centers)
+medoid_indices <- pam_result$id.med
+
+# Get the medoid documents
+medoid_docs <- ceo_pam |>
+  slice(medoid_indices) |>
+  select(cluster_pam, coname, exec_fullname, fyear, period, notes)
+
+# View the notes
+medoid_docs$notes
+```
+
+By looking at the eight medoid examples we can patterns in what distinguishes these clusters. The medoids vary a lot in detail level, from extremely brief notes (Ferguson's simple voluntary step-down) to extensive explanations with specific financial metrics. They also represent different departure circumstances, performance-related exits, mergers, health issues, and accounting irregularities.
+
+Importantly, these examples don't clearly separate into "crisis language" versus "normal language" groups. Some provide extensive financial context while others focus on personal reasons or stay vague, regardless of when they occurred. This supports what we saw in the cluster distribution, crisis and normal departures mix together in each cluster. The medoids suggest that PAM clustered departures by situation type (performance issues, mergers, health problems) rather than by economic period, which explains why crisis and normal proportions stay consistent across all eight clusters.
+
+------------------------------------------------------------------------
+
+### Crisis/Normal K-medoids Clustering
+
+To directly address our research question about how crisis differs from normal, we therefore decided to apply PAM clustering separately to each period. This approach allows us to investigate whether crisis and normal periods exhibit different internal structures. Separate clustering also accommodates the substantial sample size imbalance (544 crisis vs. 3,003 normal departures), allowing us to select appropriate k values for each period rather than using both in the same clustering structure.
+
+First, we deal with the crisis subset.
+
+```{r choosing-k-for-crisis-subset}
+# Crisis departures only (544 documents)
+crisis_docs <- lsa_docs[ceo_pam$period == "crisis", ]
+
+# Elbow method for crisis
+fviz_nbclust(
+  crisis_docs,
+  pam,
+  method = "wss",
+  k.max = 8        # Max 8 since only 544 docs
+) +
+  labs(
+    title = "Elbow Method: Crisis Period Only",
+    subtitle = "CEO Departures 2008-2009 (N=544)"
+  )
+
+# Silhouette method for crisis
+fviz_nbclust(
+  crisis_docs,
+  pam,
+  method = "silhouette",
+  k.max = 8
+) +
+  labs(
+    title = "Silhouette Method: Crisis Period Only",
+    subtitle = "CEO Departures 2008-2009 (N=544)"
+  )
+```
+
+For crisis departures, the elbow plot showed us a clear bend at k=4. The silhouette scores were similar across k=3-8 (all around 0.20-0.27). Given the plots we decided to chose k=4.
+
+Now, for the normal departures we also create both plots.
+
+```{r choosing-k-for-normal-subset}
+# Normal departures only (3,003 documents)
+normal_docs <- lsa_docs[ceo_pam$period == "normal", ]
+
+# Elbow method for normal
+fviz_nbclust(
+  normal_docs,
+  pam,
+  method = "wss",
+  k.max = 10
+) +
+  labs(
+    title = "Elbow Method: Normal Period Only",
+    subtitle = "CEO Departures 2003-2007, 2010-2014 (N=3,003)"
+  )
+
+# Silhouette method for normal
+fviz_nbclust(
+  normal_docs,
+  pam,
+  method = "silhouette",
+  k.max = 10
+) +
+  labs(
+    title = "Silhouette Method: Normal Period Only",
+    subtitle = "CEO Departures 2003-2007, 2010-2014 (N=3,003)"
+  )
+```
+
+For normal departures, the silhouette plot showed a clear peak at k=2 (silhouette = 0.23), which dropped sharply to 0.12 at k=3. Even though silhouette improved again at k=7-9, we chose k=2 because it had the highest score. The elbow plot didn't show a clear bend, so we decided to rely on the silhouette evidence.
+
+It is interesting to notice that the optimization revealed different optimal k values for each period: k=4 for crisis (based on clear elbow) and k=2 for normal (based on peak silhouette). This difference itself is meaningful, crisis departures naturally seem to divide into four types while normal departures split into two broad categories.
+
+Now, we can run our k-medoids clustering on the crisis and normal subsets.
+
+```{r -run-pam-on-crisis-vs-normal}
+# We run crisis PAM with k=4
+set.seed(2025)
+pam_crisis_final <- pam(crisis_docs, k = 4)
+
+# Normal PAM with k=2
+set.seed(2025)
+pam_normal_final <- pam(normal_docs, k = 2)
+
+# Check cluster sizes
+print(table(pam_crisis_final$clustering))
+print(table(pam_normal_final$clustering))
+```
+
+Clustering each period separately shows different patterns. Crisis departures split into four uneven groups (201, 273, 69, and 1), while normal departures split into two balanced groups (1,478 and 1,525). This suggests crisis might create more varied communication approaches, while normal times show simpler variation. The uneven crisis cluster sizes, including one with just a single departure, hint at more diverse responses during economic stress compared to the more standardized two-pattern split in normal times.
+
+We now look into the medoids of each cluster to understand the patterns.
+
+```{r compare-medoids-of-clusters}
+# We subset crisis medoids
+crisis_medoid_indices <- pam_crisis_final$id.med
+
+crisis_departures <- ceo_analysis |>
+  filter(period == "crisis")
+
+crisis_medoid_notes <- crisis_departures$notes[crisis_medoid_indices]
+
+# We display crisis notes in readable format
+for(i in 1:length(crisis_medoid_notes)) {
+  cat("\n--- Crisis Cluster", i, "medoid ---\n")
+  cat(crisis_medoid_notes[i], "\n")
+}
+
+# We do the same for normal medoids
+normal_medoid_indices <- pam_normal_final$id.med
+
+normal_departures <- ceo_analysis |>
+  filter(period == "normal")
+
+normal_medoid_notes <- normal_departures$notes[normal_medoid_indices]
+
+for(i in 1:length(normal_medoid_notes)) {
+  cat("\n--- Normal Cluster", i, "medoid ---\n")
+  cat(normal_medoid_notes[i], "\n")
+}
+```
+
+Looking at the medoid examples from crisis and normal periods, we see potential differences in how companies communicate CEO departures.
+
+Crisis appears to show more variation in detail level. The four crisis medoids range from very brief (Cluster 4: just "Merger") to quite detailed (Cluster 1: multiple sentences explaining the business context and succession plan). Crisis Cluster 1's medoid explicitly mentions "boom and bust in pay-option mortgages," directly connecting the departure to economic conditions. Crisis Cluster 2's medoid discusses stock decline and raises questions about the true reasons for departure. This range suggests crisis-period companies vary in how much context they provide - some explain extensively, others keep it minimal.
+
+Normal appears to show simpler patterns. The two normal medoids differ mainly in length and tone. Normal Cluster 1's medoid is longer and more celebratory, describing a 30-year career and expansion achievements. Normal Cluster 2's medoid is shorter and more neutral, simply stating the CEO resigned and the company anticipates improving conditions. This suggests normal-period departures split between detailed positive narratives and brief factual announcements.
+
+In terms of bringing it back to our reseach question, we can see that these examples suggest crisis and normal periods may organize departure communications differently. Crisis seems to vary in detail/transparency, meaning how much to explain about circumstances. Normal subset seems to vary in tone, meaning whether to celebrate or just state facts. However, we need to examine more departures from each cluster beyond just the medoids to confirm if this pattern holds across more cluster entries.
+
+To do that, we examine more notes.
+
+```{r examine-extra-notes}
+# Get 3 random examples from each crisis cluster
+set.seed(123)
+
+crisis_examples <- ceo_analysis |>
+  filter(period == "crisis") |>
+  mutate(cluster = pam_crisis_final$clustering) |>
+  group_by(cluster) |>
+  slice_sample(n = 3) |>  # 3 random from each cluster
+  ungroup() |>
+  select(cluster, coname, exec_fullname, fyear, notes)
+
+# Print by cluster
+for(i in 1:4) {
+  cat("\n=== CRISIS CLUSTER", i, "EXAMPLES ===\n")
+  cluster_i <- crisis_examples |> filter(cluster == i)
+  for(j in 1:nrow(cluster_i)) {
+    cat("\nExample", j, ":", cluster_i$coname[j], "-", cluster_i$exec_fullname[j], "(", cluster_i$fyear[j], ")\n")
+    cat(cluster_i$notes[j], "\n")
+  }
+}
+
+# We also get 3 examples from each normal cluster
+set.seed(123)
+
+normal_examples <- ceo_analysis |>
+  filter(period == "normal") |>
+  mutate(cluster = pam_normal_final$clustering) |>
+  group_by(cluster) |>
+  slice_sample(n = 3) |> 
+  ungroup() |>
+  select(cluster, coname, exec_fullname, fyear, notes)
+
+# Print by cluster
+for(i in 1:2) {
+  cat("\n=== NORMAL CLUSTER", i, "EXAMPLES ===\n")
+  cluster_i <- normal_examples |> filter(cluster == i)
+  for(j in 1:nrow(cluster_i)) {
+    cat("\nExample", j, ":", cluster_i$coname[j], "-", cluster_i$exec_fullname[j], "(", cluster_i$fyear[j], ")\n")
+    cat(cluster_i$notes[j], "\n")
+  }
+}
+```
+
+Looking at the cluster examples shows us an important difference between how crisis and normal periods organize CEO departure communications.
+
+Crisis clusters differ in how much companies explain. Some crisis departures openly discuss performance problems (falling market share, financial struggles), while others focus on personal reasons (retirement plans, health issues) or just announce the transition without mentioning problems. This suggests crisis creates a difficult choice for companies: should we explain what went wrong or not?
+
+Normal clusters differ in how much companies celebrate. Some normal departures emphasize long careers and careful succession planning, while others simply state the facts briefly. The choice seems to be about how positive and detailed to be, not whether to acknowledge problems.
+
+Crisis and normal periods create different communication challenges. During crisis, companies face a transparency question, whether to acknowledge business difficulties. During normal times, companies face a tone question, whether to elaborate on achievements or keep it brief. This difference might explain why crisis produced more cluster types (4) than normal (2), the transparency decision creates more possible responses than the tone decision.
+
+However, it's important to acknowledge that we're looking at small samples, so these patterns may not hold for all departures in each cluster.
+
+------------------------------------------------------------------------
+
+### Final Findings: How Crisis and Normal Periods Are Different
+
+Our analysis using keyness, BERTopic, and clustering shows us patterns in how CEO departures are documented across crisis and normal periods. We note that our dataset seems to contains a mix of original announcements and researcher summaries, so these patterns may reflect differences in documentation rather than purely corporate communication choices.
+
+**Vocabulary differences (from keyness)**
+
+Looking at which words distinguish the periods, we found that some of the crisis departures mentioned "recession" explicitly to explain problems, while normal departures used words like "personal" and "elected" to frame exits as individual choices. Crisis notes also had more company-specific names (Wilmington, Motorola, Exxon), possibly because certain industries faced concentrated problems during 2008-2009. This suggests companies might attribute departures to external forces during crisis but to internal factors during stable times.
+
+**Thematic differences (from BERTopic)**
+
+BERTopic showed us that while most topics appear in both periods, their relative prevalence cahnges. Example documents showed that crisis-heavy topics tend to involve external pressure or difficult circumstances, while normal-heavy topics feature more routine transitions. However, these differences were modest, suggesting crisis shifts the emphasis rather than creating entirely new narrative categories.
+
+**Structural differences (from clustering)**
+
+When we clustered each period separately, we noticed different patterns. Crisis split into four types with uneven sizes, while normal split into two balanced types. Looking at examples from each cluster, crisis narratives seemed to vary in how much detail they provided, some explained problems extensively while others stayed brief. Normal narratives seemed to vary more in tone, some celebrated careers while others just stated facts.
+
+**What this tells us**
+
+Now we are ready to answer our main research question: Do CEO departure narratives fundamentally change during economic crises compared to normal times? Our analysis suggests the answer is both yes and no. Crisis doesn't appear to create entirely different narrative structures, meaning that when we clustered all departures together, crisis and normal mixed proportionally in every cluster rather than separating into distinct groups. This indicates companies use similar underlying templates regardless of economic period. BERTopic supports this, all of the 11 topics appear in both periods, just with different frequencies.
+
+However, crisis does seem to shape communication in three ways. First, it might change vocabulary choice, meaning companies explicitly state recession and external economic forces during crisis while using personal and internal reasons during normal times. Second, it shifts thematic emphasis, with crisis departures more likely to involve pressure or abrupt changes. Third, it appears to create more varied strategic responses. So crisis doesn't totally transform departure communication, but it does seem to complicate it, adding external blame language, shifting thematic focus, and creating more diverse approaches as companies navigate difficult times.
+
+### Implications for Stakeholders
+
+For investors and analysts reading CEO departure announcements, our findings suggest that it is importan to pay attention to what isn't said as much as what is. During crisis periods, explicit mention of economic conditions may signal that boards are framing departures defensively, while silence about broader context doesn't necessarily mean the departure is unrelated to economic pressures. For boards and communications teams, our analysis might suggest that crisis doesn't require fundamentally different announcement templates, meaning the same narrative structures appear in both periods, just with different vocabulary choices. Finally, for researchers studying corporate communication, the high outlier rate in topic modeling (40%) and weak clustering separation suggest that CEO departure announcements may be more formulaic than thematically different, making them challenging subjects for text-based classification.
+
+------------------------------------------------------------------------
+
+### Limitations
+
+**Crisis period definition**
+
+We defined crisis as 2008-2009 and normal as 2003-2007 plus 2010-2014, but economic stress doesn't follow strict year boundaries. It is important to note that some 2007 departures we classified as "normal" might already reflect emerging financial problems, while some 2010 departures might still involve crisis environment. Drawing such a sharp line is somewhat artificial and likely doesn't capture all the actual differences.
+
+**Unequal sample sizes**
+
+Our dataset contains about five times more normal-period departures (3,003) than crisis-period departures (544). This imbalance creates challenges when comparing patterns between periods. Smaller samples generally provide less reliable evidence of underlying patterns, so we have less confidence in conclusions drawn from the crisis subset. Additionally, with fewer crisis cases overall, we may have missed less common communication approaches that simply didn't appear often enough in our limited crisis sample.
+
+**Limited close reading**
+
+Throughout our analysis, when examining specific patterns we typically looked at 3-5 example documents per topic or cluster. With over 3,500 departure notes with varying sizes, reading much more of them in detail was not feasible. This means our interpretations of what each topic or cluster represents are based on small samples that may not capture the full range of documents within each group. A document we didn't examine might tell a different story than the examples we selected. Our findings should therefore be understood as patterns suggested by representative examples rather than comprehensive characterizations of every departure in each category.
+
+**Industry challenges**
+
+The financial sector and manufacturing appear heavily in our crisis sample (Wilmington Trust, Motorola, Exxon) because these industries suffered disproportionately during 2008-2009. What we're calling "crisis patterns" might actually be "financial sector patterns during crisis." We cannot truly separate whether differences come from economic timing or from which industries experienced departures when.
+
+**Text being a constructed data**
+
+The departure notes in our dataset are a mix of different sources, some are summaries written by researchers compiling information from news articles and SEC filings, while others appear to be excerpts from original corporate announcements. This means we're not always analyzing what companies actually said, but sometimes analyzing researchers' interpretations and summaries of what happened. Different researchers might have summarized the same departure differently, and their choices about what to include or emphasize could create patterns in our data that don't reflect actual differences in corporate communication strategies.
+
+**Limited generalizability**
+
+It is important to note that our dataset only includes S&P 1500 firms, large, publicly traded companies with professional communications teams. Our findings may not apply to smaller companies, private firms, or international corporations. SImilarly, our findings come from our analysis of one specific crisis period, so we present them as suggestive patterns rather than definitive conclusions. Economic context appears to play a role in shaping corporate communication, but the strength of its influence is uncertain given the many other factors that shape how companies announce CEO departures.
+
+------------------------------------------------------------------------
+
+### Ethical Considerations
+
+**Real people involved**
+
+This analysis focuses on CEO departures, but these involve real people with careers and reputations at stake. Learning about 2008 crisis showed me that it affected not just corporations but ordinary families and communities. The executives in our dataset cannot respond to our analysis or provide context beyond what appears in the notes. When using CEO dataset or our analysis one should be cautious about judging decisions made during extraordinary circumstances.
+
+**Potential for misuse**
+
+Our findings identify patterns in how departures are described during difficult times. This information could be used to detect when companies are struggling, but it could also be used to craft announcements that hide problems more effectively. Research intended to improve understanding can sometimes become a tool for misinformation instead, and it is important to prevent that,
+
+**Power imbalances**
+
+CEO departures affect different people differently. Institutional investors have teams who can analyse announcements and act quickly. Employees might learn about leadership changes from the same announcements but might be not able to interpret what the language might mean for their jobs. Our analysis of communication patterns is likely more useful to those who already have resources to act on such insights than to those most affected by the departures themselves.
+
+**Systemic context**
+
+The 2008-2009 crisis was a systemic failure affecting entire industries. Companies faced competing demands - transparency for investors, reassurance for employees, legal protection - simultaneously. Communication choices during crisis reflect genuine difficulty, not necessarily deception.
+
+**Limits of text analysis**
+
+Finally, we need to acknowledge what this analysis can't reveal. We found patterns in language, but we can't know what people were actually thinking or why boards made their decisions. We don't know what information was available when departure descriprions were written, or what pressures companies faced. Our methods can identify which words appear more often in different contexts, but they can't tell us about the reasons behind those choices or the circumstances people were navigating. Before drawing conclusions about companies or individuals based on these findings, we should remember that behind each departure is a person navigating a complex situation our analysis cannot fully capture.
+
+------------------------------------------------------------------------
+
+### Generative AI Use
+
+-   I used Claude AI to help write code for displaying results in readable formats. For example, when I needed to print out medoid notes or cluster examples, I would tell Claude what R objects I had (like `notes-by-same-dominant-topic` and ask it to write `cat()`loops to display them clearly. This saved time formatting outputs and made my results presentation more organized.
+
+-   I used Claude AI to help structure code for extracting top examples from each topic in the `notes-by-dominant-topic` code chunk. Claude provided an initial approach using `map_df()` to iterate through topics and find documents with highest probabilities, which I then edited to fit my specific needs. I changed the number of examples, adjusting which variables to select, and modifying how the results were organized. This helped me understand how to efficiently extract and organize topic model results rather than manually subsetting the data for each topic.
+
+-   I used Claude AI to help me set up and debug BERTopic initialization locally on my laptop. I also used Claude to learn how to make the results reproducible, meaning I got the suggestion to specify UMAP and implemented the code myself.
+
+-   I used Grammarly to proofread Findings, Limitations and Ethical Considerations parts of the assignment for grammatical, spelling and punctuation errors. After Grammarly identified areas for improvement, I edited problematic parts myself.
